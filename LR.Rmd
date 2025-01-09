@@ -1,0 +1,705 @@
+---
+title: "LR"
+author: "Alicia"
+date: "2024-11-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r directory}
+setwd("C:/Users/alici/Desktop/TFM/R/Metabolomica")
+```
+
+```{r packages}
+#install.packages("glmnet")
+if (!require("caret")) install.packages("caret")
+if (!require("smotefamily")) install.packages("smotefamily")
+```
+
+```{r libraries}
+library(caret)
+library(ROCR)
+library(MLeval)
+library(glmnet)
+library(smotefamily)
+library(iml)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+```
+
+```{r}
+g1="Pre_M_LR"
+g2="Post_M_LR" 
+g3="Post_M_HR"
+compar1=paste(g1,"vs",g2,sep="")
+compar2=paste(g2,"vs",g3,sep="")
+today="041224"
+label1=paste(today,"_",compar1,"_LR",sep="")
+label2=paste(today,"_",compar2,"_LR",sep="")
+classes1 <- c("Pre_M_LR", "Post_M_LR")
+classes2 <- c("Post_M_LR", "Post_M_HR")
+cmOut1=paste(label1,"_ConfusionMatrix.txt",sep="")
+cmOut2=paste(label2,"_ConfusionMatrix.txt",sep="")
+
+data=read.table("C:/Users/alici/Desktop/TFM/R/Metabolomica/041224_PrePost_Menop_Cleaned95_risk_factors.txt",as.is=T,h=T,check.names=T,sep="\t",na = c("NA", "NDEF", "TAG","NaN","ND"))
+
+str(data)
+```
+
+# Prepare data for the analysis of Post-M-LR vs Pre-M-LR
+
+```{r}
+data$Grupo <- factor(data$Grupo, levels= c("1", "2", "3"), labels= c("Pre_M_LR", "Post_M_LR", "Post_M_HR"))
+data_g1_g2 <- data[data$Grupo %in% classes1, ]
+data_g1_g2 <- droplevels(data[data$Grupo %in% classes1, ])
+table(data_g1_g2$Grupo)
+levels(data_g1_g2$Grupo)
+#str(data_g1_g2)
+
+data_g1_g2$Edad <- as.numeric(data_g1_g2$Edad)
+
+
+y=as.matrix(data_g1_g2$Grupo)
+y=as.factor(y)
+
+
+clinical <- data_g1_g2[, !colnames(data_g1_g2) %in% c("Grupo", "Edad")]
+#str(clinical)
+
+prepro=preProcess(clinical,method=c("center","scale")) 
+
+x=predict(prepro,clinical)
+
+#str(x)
+anyNA(x)
+
+x=data.matrix((x))
+```
+
+# Prepare data for the analysis of Post-M-HR vs Post-M-LR
+
+```{r}
+data_g2_g3 <- data[data$Grupo %in% classes2, ]
+data_g2_g3 <- droplevels(data[data$Grupo %in% classes2, ])
+table(data_g2_g3$Grupo)
+levels(data_g2_g3$Grupo)
+#str(data_g2_g3)
+
+data_g2_g3$Edad <- as.numeric(data_g2_g3$Edad)
+
+y2=as.matrix(data_g2_g3$Grupo)
+y2=as.factor(y2)
+
+
+clinical2 <- data_g2_g3[, !colnames(data_g2_g3) %in% c("Grupo")]
+#str(clinical2)
+
+prepro2=preProcess(clinical2,method=c("center","scale")) 
+
+x2=predict(prepro2,clinical2)
+str(x2)
+anyNA(x2)
+
+x2=data.matrix((x2))
+```
+
+
+# Function for evaluating different metrics of Logistic Regression
+
+```{r}
+evaluate_alpha_glmnet <- function(
+  x, y, 
+  alpha_values = seq(0, 1, by = 0.1), 
+  family = "binomial", 
+  metric = "Accuracy", 
+  cv_method = "cv", 
+  cv_number = 10, 
+  sampling_method = NULL,  # Sampling method: "up", "down", "smote", etc.
+  positive_class = NULL    # User-defined positive class
+) {
+  # Create a list to store models
+  list.of.models <- list()
+  
+  # Metrics results for each alpha
+  results <- data.frame()
+  
+  # Cross-validation
+  if (cv_method == "LOOCV") {
+    Train_control <- trainControl(
+      method = "LOOCV",
+      savePredictions = "final", 
+      classProbs = TRUE,
+      sampling = sampling_method
+    )
+  } else {
+    Train_control <- trainControl(
+      method = "cv", 
+      number = cv_number,
+      savePredictions = "final", 
+      classProbs = TRUE,
+      sampling = sampling_method
+    )
+  }
+  
+  # Show details of the selected method
+  cat("Cross-validation method:", cv_method, "\n")
+  if (!is.null(sampling_method)) cat("Applied sampling method:", sampling_method, "\n")
+  if (!is.null(positive_class)) cat("User-defined positive class:", positive_class, "\n")
+  
+  # Adjust levels of the target variable if a positive class is specified
+  if (!is.null(positive_class)) {
+    y <- factor(y, levels = c(positive_class, setdiff(levels(y), positive_class)))
+  }
+  
+  # Iterate over alpha values
+  for (alpha_val in alpha_values) {
+    # Fit the model with cv.glmnet
+    cv_model <- cv.glmnet(
+      x, 
+      y, 
+      family = family, 
+      alpha = alpha_val
+    )
+    
+    # Get the optimal lambda
+    best_lambda <- cv_model$lambda.1se
+    
+    # Define the parameter grid
+    tunegrid <- expand.grid(alpha = alpha_val, lambda = best_lambda)
+    
+    # Train the model
+    model <- train(
+      x = x,
+      y = y,
+      method = "glmnet",
+      metric = metric,
+      tuneGrid = tunegrid,
+      trControl = Train_control,
+      family = family
+    )
+    
+    # Save the model
+    list.of.models[[paste0("alpha_", alpha_val)]] <- model
+    
+    # Evaluate the model
+    confusion <- confusionMatrix(
+      data = factor(model$pred$pred, levels = levels(y)),
+      reference = factor(model$pred$obs, levels = levels(y)),
+      positive = positive_class
+    )
+    
+    # Extract metrics
+    accuracy <- confusion$overall["Accuracy"]
+    kappa <- confusion$overall["Kappa"]
+    sensitivity <- confusion$byClass["Sensitivity"]
+    specificity <- confusion$byClass["Specificity"]
+    
+    # Store the results
+    results <- rbind(
+      results, 
+      data.frame(
+        alpha = alpha_val, 
+        lambda = best_lambda, 
+        Accuracy = accuracy, 
+        Sensitivity = sensitivity, 
+        Specificity = specificity,
+        Kappa = kappa
+      )
+    )
+  }
+  
+  # Select the best alpha based on the chosen metric
+  best_alpha <- results[which.max(results[[metric]]), "alpha"]
+  best_model <- list.of.models[[paste0("alpha_", best_alpha)]]
+  
+  # Return results
+  list(
+    results_table = results,
+    best_model = best_model,
+    best_alpha = best_alpha,
+    best_confusion = confusionMatrix(
+      data = factor(best_model$pred$pred, levels = levels(y)),
+      reference = factor(best_model$pred$obs, levels = levels(y)),
+      positive = positive_class
+    )
+  )
+}
+
+```
+
+# Function for obtaining the AUC-ROC curve with TPR and FPR
+
+```{r}
+plot_roc_auc <- function(optimized_model, main_title = "ROC Curve", positive_class = NULL) {
+  # Load necessary libraries
+  if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
+  if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+  library(pROC)
+  library(ggplot2)
+  
+  # Extract predictions
+  pred <- optimized_model$pred
+  obs <- as.factor(pred$obs)
+  
+  # Check if the positive class exists in the levels
+  if (!positive_class %in% levels(obs)) {
+    stop("The specified positive class is not present in the data.")
+  }
+  
+  # Reorder levels of the observed variable to ensure the positive class is the one of interest
+  obs <- factor(obs, levels = c(positive_class, setdiff(levels(obs), positive_class)))
+  
+  # Extract predicted probabilities for the positive class
+  predicted_probabilities <- as.numeric(pred[[positive_class]])
+  
+  # Calculate ROC curve
+  roc_curve <- roc(obs, predicted_probabilities, levels = rev(levels(obs)))
+  auc_value <- auc(roc_curve)
+  
+  # Extract TPR and FPR
+  roc_data <- data.frame(
+    TPR = roc_curve$sensitivities,         # True Positive Rate
+    FPR = 1 - roc_curve$specificities      # False Positive Rate
+  )
+  
+  # Plot TPR and FPR
+  plot(roc_data$FPR, roc_data$TPR, type = "l", col = "red", lwd = 2, 
+       xlab = "False Positive Rate", ylab = "True Positive Rate", 
+       main = main_title)
+  abline(a = 0, b = 1, col = "gray", lty = 2)  # Random diagonal
+  
+  # Add legend
+  legend("bottomright", 
+         legend = paste(positive_class, "\nAUC-ROC =", round(auc_value, 3)), 
+         col = "red", 
+         lwd = 2, 
+         bty = "n", 
+         text.col = "black")
+  
+  # Return AUC in case it is needed
+  return(auc_value)
+}
+```
+
+
+
+
+# Apply Logistic Regression for Post-M-LR vs Pre-M-LR: 
+
+```{r}
+# Using 5-fold and SMOTE
+set.seed(10)
+LR_1_2_5_cv <- evaluate_alpha_glmnet(
+  x = x,
+  y = y,
+  alpha_values = seq(0, 1, by = 0.1),
+  family = "binomial",
+  metric = "Accuracy",
+  cv_method = "cv",
+  cv_number = 5,
+  sampling_method = "smote",
+  positive_class = "Post_M_LR"
+)
+
+LR_1_2_5_cv$results_table  
+print(LR_1_2_5_cv$best_alpha) 
+
+print(LR_1_2_5_cv$best_confusion)
+```
+
+
+```{r}
+auc_LR_1_2_5_cv <- plot_roc_auc(
+  LR_1_2_5_cv$best_model, 
+  main_title = "LR", 
+  positive_class = "Post_M_LR"
+)
+
+confusion <- as.table(LR_1_2_5_cv$best_confusion$table)
+
+conf_matrix_df <- as.data.frame(confusion)
+
+conf_matrix_df$Prediction <- factor(conf_matrix_df$Prediction, levels = c("Pre_M_LR", "Post_M_LR"))
+conf_matrix_df$Reference <- factor(conf_matrix_df$Reference, levels = c("Post_M_LR", "Pre_M_LR")) 
+
+conf_matrix_df$Class <- ifelse(conf_matrix_df$Prediction == conf_matrix_df$Reference, "True", "False")
+
+confusion_plot <- ggplot(conf_matrix_df, aes(x = Reference, y = Prediction, fill = Class)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), color = "black", size = 7) +
+  scale_fill_manual(
+    values = c("True" = "#A8E6A2", "False" = "#F4B6B2"),
+    name = "Classification",                            
+    labels = c("False", "True")
+  ) +
+  scale_x_discrete(position = "top") +  
+  labs(
+    title = "Confusion Matrix",
+    x = "Actual",
+    y = "Predicted"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, hjust = 0.5, face = "bold"),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 11)
+  )
+
+print(confusion_plot)
+
+ggsave(
+  filename = "confusion_matrix_LR_g1g2.svg",   
+  plot = confusion_plot,               
+  width = 6,                           
+  height = 2,                          
+  dpi = 300                            
+)
+
+svg("roc_auc_LR_g1g2.svg", width = 4, height = 4)
+
+plot_roc_auc(
+  LR_1_2_5_cv$best_model, 
+  main_title = "LR", 
+  positive_class = "Post_M_LR"
+)
+
+dev.off()
+```
+
+
+# Calculate SHAP values for the model 
+
+```{r}
+x <- as.data.frame(x)
+
+# Create the predictor object for the fitted model
+predictor <- Predictor$new(
+  model = LR_1_2_5_cv$best_model,         
+  data = x,       
+  y = y                       
+)
+
+shap_values_all <- list()
+
+# Iterate over all observations
+for (i in 1:nrow(x)) {
+  cat("Calculating SHAP for sample", i, "of", nrow(x), "\n")
+  
+  x_interest_single <- x[i, , drop = FALSE]
+  
+  shapley <- Shapley$new(predictor, x.interest = x_interest_single)
+  
+  shap_values <- shapley$results
+  shap_values$sample_id <- i
+  
+  shap_values_all[[i]] <- shap_values
+}
+
+# Combine all results into a single dataframe
+shap_values_df <- bind_rows(shap_values_all)
+
+# Calculate the average importance of each variable
+shap_summary <- shap_values_df %>%
+  group_by(feature) %>%
+  summarize(mean_phi = mean(abs(phi)), .groups = "drop") %>%
+  arrange(desc(mean_phi))
+
+# Select the top 10 most important variables
+top_10 <- shap_summary %>% slice(1:10)
+
+# Visualize the most important variables globally
+shap_g1g2 <- ggplot(top_10, aes(x = reorder(feature, mean_phi), y = mean_phi)) +
+  geom_bar(stat = "identity", fill = "#78B056") +
+  coord_flip() +
+  labs(title = "Average importance of variables (SHAP)",
+       x = "Features (Metabolites)",
+       y = "Average SHAP value (|phi|)") +
+  theme_minimal() +
+  theme(panel.grid = element_blank()) 
+
+# Save the image
+ggsave("shap_importance_plot_g1g2.png", plot = shap_g1g2, width = 8, height = 4, dpi = 300)
+
+
+```
+
+
+# Violin plot of the 10 top performing metabolites
+
+```{r}
+# List of variables to plot
+variables <- c("SM", "Creatinine", "S_LDL_P", "Proline", 
+               "Glucose", "FC", "w6_w7", "HDL_Z", "IDL_C", "S_HDL_P")
+
+# List of units for each variable
+units <- c("mmol/L", "μmol/L", "nmol/L", "μmol/L", 
+           "mmol/L", "mmol/L", "mmol/L", "nm", 
+           "mg/dL", "μmol/L")
+
+plot_list <- list()
+
+# Loop to generate violin plots
+for (i in 1:length(variables)) {
+  
+  # Calculate p-value with t-test
+  p_value <- t.test(data_g1_g2[[variables[i]]] ~ data_g1_g2$Grupo)$p.value
+  
+  if (p_value < 0.001) {
+    p_label <- "p < 0.001"
+  } else {
+    p_label <- paste0("p = ", round(p_value, 3))
+  }
+  
+  # Create the plot with the corresponding unit
+  p <- ggplot(data_g1_g2, aes_string(x = "Grupo", y = variables[i], fill = "Grupo")) +
+  geom_violin(trim = FALSE, width = 1.2, color = "black", alpha = 0.6) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, alpha = 0.7, color = "black") +
+  stat_summary(fun = "median", geom = "point", size = 2, color = "black") +  
+  labs(x = NULL, y = units[i], title = variables[i]) +
+  annotate("text", x = 1.5, y = Inf, label = p_label, vjust = 2, size = 8, fontface = "plain") +
+  theme_minimal(base_size = 14) + 
+  scale_fill_manual(values = c("#A7A7A7", "#F78D80"), guide = "none") + 
+  scale_x_discrete(labels = levels(data_g1_g2$Grupo)) + 
+  theme(
+    legend.position = "none",  
+    axis.title = element_text(size = 20),  
+    axis.text.x = element_text(size = 20),  
+    axis.ticks.x = element_blank(), 
+    plot.title = element_text(hjust = 0.5, size = 20, face = "bold"), 
+    plot.margin = margin(5, 5, 10, 5) 
+  )
+  
+  plot_list[[variables[i]]] <- p
+}
+
+combined_plot <- ggarrange(plotlist = plot_list, ncol = 5, nrow = 2)
+
+print(combined_plot)
+
+# Save the combined image
+ggsave("Violin_Plots_g1g2.png", combined_plot, width = 20, height = 10, bg = "white")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Apply Logistic Regression for Post-M-HR vs Post-M-LR:
+
+```{r}
+# Using 5-fold and SMOTE
+set.seed(10)
+LR_2_3_5_cv <- evaluate_alpha_glmnet(
+  x = x2,
+  y = y2,
+  alpha_values = seq(0, 1, by = 0.1),
+  family = "binomial",
+  metric = "Accuracy",
+  cv_method = "cv",
+  cv_number = 5,
+  sampling_method = "smote",
+  positive_class = "Post_M_HR"
+)
+
+LR_2_3_5_cv$results_table
+print(LR_2_3_5_cv$best_alpha)
+
+print(LR_2_3_5_cv$best_confusion)
+```
+
+
+
+```{r}
+auc_LR_2_3_5_cv <- plot_roc_auc(
+  LR_2_3_5_cv$best_model, 
+  main_title = "LR", 
+  positive_class = "Post_M_HR"
+)
+
+confusion <- as.table(LR_2_3_5_cv$best_confusion$table)
+
+conf_matrix_df <- as.data.frame(confusion)
+
+conf_matrix_df$Prediction <- factor(conf_matrix_df$Prediction, levels = c("Post_M_LR", "Post_M_HR"))
+conf_matrix_df$Reference <- factor(conf_matrix_df$Reference, levels = c("Post_M_HR", "Post_M_LR"))
+
+conf_matrix_df$Class <- ifelse(conf_matrix_df$Prediction == conf_matrix_df$Reference, "True", "False")
+
+confusion_plot <- ggplot(conf_matrix_df, aes(x = Reference, y = Prediction, fill = Class)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), color = "black", size = 7) +
+  scale_fill_manual(
+    values = c("True" = "#A8E6A2", "False" = "#F4B6B2"), 
+    name = "Classification",                             
+    labels = c("False", "True")
+  ) +
+  scale_x_discrete(position = "top") +  
+  labs(
+    title = "Confusion Matrix",
+    x = "Actual",
+    y = "Predicted"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, hjust = 0.5, face = "bold"),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 11)
+  )
+
+print(confusion_plot)
+
+ggsave(
+  filename = "confusion_matrix_LR_g2g3.svg",   
+  plot = confusion_plot,               
+  width = 6,                           
+  height = 2,                          
+  dpi = 300                            
+)
+
+svg("roc_auc_LR_g2g3.svg", width = 4, height = 4)
+
+plot_roc_auc(
+  LR_2_3_5_cv$best_model, 
+  main_title = "LR", 
+  positive_class = "Post_M_HR"
+)
+
+dev.off()
+
+```
+
+
+# Calculate SHAP values for the model 
+
+```{r}
+x2 <- as.data.frame(x2)
+
+# Create the predictor object for the fitted model
+predictor <- Predictor$new(
+  model = LR_2_3_5_cv$best_model,         
+  data = x2,         
+  y = y2                       
+)
+
+shap_values_all <- list()
+
+# Iterate over all observations
+for (i in 1:nrow(x2)) {
+  cat("Calculando SHAP para muestra", i, "de", nrow(x2), "\n")
+  
+  x_interest_single <- x2[i, , drop = FALSE]
+  
+  shapley <- Shapley$new(predictor, x.interest = x_interest_single)
+  
+  shap_values <- shapley$results
+  shap_values$sample_id <- i
+  
+  shap_values_all[[i]] <- shap_values
+}
+
+# Combine all results into a single dataframe
+shap_values_df <- bind_rows(shap_values_all)
+
+# Calculate the average importance of each variable
+shap_summary <- shap_values_df %>%
+  group_by(feature) %>%
+  summarize(mean_phi = mean(abs(phi)), .groups = "drop") %>%
+  arrange(desc(mean_phi))
+
+# Select the top 10 most important variables
+top_10 <- shap_summary %>% slice(1:10)
+
+# Visualize the most important variables globally
+shap_g2g3 <- ggplot(top_10, aes(x = reorder(feature, mean_phi), y = mean_phi)) +
+  geom_bar(stat = "identity", fill = "#78B056") +
+  coord_flip() +
+  labs(title = "Average importance of variables",
+       x = "Metabolites",
+       y = "Average SHAP value (|phi|)") +
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        axis.line = element_line(color = "black"),  
+        axis.ticks = element_line(color = "black"))
+
+# Save the image
+ggsave("shap_importance_plot_g2g3.svg", plot = shap_g2g3, width = 8, height = 4, dpi = 300)
+```
+
+
+# Violin plot of the 10 top performing metabolites
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+
+# List of variables to plot
+variables <- c("IDL_C", "FC", "LDL_TG", "EC", 
+               "L_LDL_P", "LDL_C", "DHA", "Total_PUFA", "SM", "Histidine")
+
+# List of units for each variable
+units <- c("mg/dL", "mmol/L", "mg/dL", "mmol/L", 
+           "nmol/L", "mg/dL", "mmol/L", "mmol/L", 
+           "mmol/L", "μmol/L")
+
+plot_list <- list()
+
+# Loop to generate violin plots
+for (i in 1:length(variables)) {
+  
+  # Calculate p-value with t-test
+  p_value <- t.test(data_g2_g3[[variables[i]]] ~ data_g2_g3$Grupo)$p.value
+  if (p_value < 0.001) {
+    p_label <- "p < 0.001"
+  } else {
+    p_label <- paste0("p = ", round(p_value, 3))
+  }
+
+  # Create the plot with the corresponding unit
+  p <- ggplot(data_g2_g3, aes_string(x = "Grupo", y = variables[i], fill = "Grupo")) +
+  geom_violin(trim = FALSE, width = 1.2, color = "black", alpha = 0.6) +  
+  geom_boxplot(width = 0.1, outlier.shape = NA, alpha = 0.7, color = "black") +
+  stat_summary(fun = "median", geom = "point", size = 2, color = "black") +  
+  labs(x = NULL, y = units[i], title = variables[i]) +
+  annotate("text", x = 1.5, y = Inf, label = p_label, vjust = 2, size = 8, fontface = "plain") +
+  theme_minimal(base_size = 14) +  
+    scale_fill_manual(values = c("#F78D80", "#AD0B1E")) +  
+    scale_x_discrete(labels = levels(data_g2_g3$Grupo)) +  
+  theme(
+    legend.position = "none",  
+    axis.title = element_text(size = 20),  
+    axis.text.x = element_text(size = 20),  
+    axis.ticks.x = element_blank(),  
+    plot.title = element_text(hjust = 0.5, size = 20, face = "bold"),  
+    plot.margin = margin(5, 5, 10, 5) 
+  )
+  
+  plot_list[[variables[i]]] <- p
+}
+
+combined_plot <- ggarrange(plotlist = plot_list, ncol = 5, nrow = 2)
+
+print(combined_plot)
+
+# Save the combined image
+ggsave("Violin_Plots_g2g3.svg", combined_plot, width = 20, height = 10, bg = "white")
+```

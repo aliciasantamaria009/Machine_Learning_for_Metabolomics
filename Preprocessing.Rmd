@@ -1,0 +1,537 @@
+---
+title: "Preprocessing"
+author: "Alicia"
+date: "2024-10-21"
+output: html_document
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 2 
+lang: es-ES
+header-includes:
+  - \usepackage{fvextra}\DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+  - "\\usepackage{geometry}"
+  - "\\geometry{letterpaper, margin=1in}"
+  - "\\usepackage{ragged2e}"
+  - "\\justifying"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(comment = NA, prompt = FALSE, tidy = FALSE, 
+               fig.width = 5, fig.height = 5,echo = TRUE, 
+               message = FALSE, warning = FALSE, cache=FALSE, fig.align = "center")
+Sys.setlocale("LC_TIME", "C")
+```
+
+
+# Step 1: Set working directory, create labels, and load relevant packages
+
+```{r packages, echo = FALSE, message = FALSE}
+options(warn = -1)
+if(!(require(mlbench))) install.packages("mlbench")
+if(!(require(caret))) install.packages("caret")
+if(!(require(matrixStats))) install.packages("matrixStats")
+if(!(require(hot.deck))) install.packages("hot.deck")
+if(!(require(bnstruct))) install.packages("bnstruct")
+if(!(require(plyr))) install.packages("plyr")
+if(!(require(readxl))) install.packages("readxl")
+if(!(require(knitr))) install.packages("knitr")
+if(!(require(purrr))) install.packages("purrr")
+if(!(require(ggplot2))) install.packages("ggplot2")
+if(!require(car)) install.packages("car")
+if(!require(factoextra)) install.packages("factoextra")
+```
+
+```{r libraries, echo = FALSE, message = FALSE}
+library(caret)
+library(matrixStats)
+library(bnstruct)
+library(plyr)
+library(readxl)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(car)
+library(stats)
+library(factoextra)
+```
+
+```{r}
+setwd("C:/Users/alici/Desktop/TFM/R/Metabolomica")
+
+today="041224"
+cohort="PrePost_Menop"
+ifilename="NMR_Metabolomic_Results_PinedaI001.xlsx"
+clinic_data="datos_clinicos.xlsx"
+imputed_filename=paste(today,cohort,"metabolomics","Imputed_risk_factors.txt",sep="_")
+CM_filename=paste(today,cohort,"CorrelationMatrix_risk_factors.txt",sep="_")
+cleaned_filename=paste(today,cohort,"Cleaned95_risk_factors.txt",sep="_")
+cutoff=0.95
+
+
+# Dataframe creation
+sheet_names <- excel_sheets(ifilename)
+data_list <- list()
+for (sheet in sheet_names) {
+  data <- read_excel(ifilename, sheet = sheet, skip = 6)
+  data_list[[sheet]] <- data
+}
+
+metabolomic_data <- reduce(data_list, function(x, y) {
+  inner_join(x, y, by = c("Sample ID BT", "Sample ID Client"))
+})
+
+head(metabolomic_data)
+
+clinic_data <- read_excel(clinic_data)
+
+metabolomic_data <- metabolomic_data %>%
+  left_join(clinic_data, by = c("Sample ID BT", "Sample ID Client"))
+
+head(metabolomic_data)
+```
+
+
+## Modify some variables:
+
+```{r}
+str(metabolomic_data)
+
+# We change the year of birth to age
+metabolomic_data$Edad <- 2024 - metabolomic_data$`Año nac.`
+metabolomic_data$`Año nac.` <- NULL
+
+# Convert categorical variables to numerical
+metabolomic_data <- metabolomic_data %>%
+  mutate(
+    `Fumadora SI/NO` = case_when(
+      `Fumadora SI/NO` %in% c("si", "sí", "SI") ~ 1,
+      `Fumadora SI/NO` %in% c("no", "NO") ~ 2,
+      TRUE ~ NA_real_
+    ),
+    `Presencia de diabetes SI/NO` = case_when(
+      `Presencia de diabetes SI/NO` %in% c("si", "sí", "SI") ~ 1,
+      `Presencia de diabetes SI/NO` %in% c("no", "NO") ~ 2,
+      TRUE ~ NA_real_
+    ),
+    `Antecedentes de enfermedad cardiovascular SI/NO` = case_when(
+      `Antecedentes de enfermedad cardiovascular SI/NO` %in% c("si", "sí", "SI") ~ 1,
+      `Antecedentes de enfermedad cardiovascular SI/NO` %in% c("no", "NO") ~ 2,
+      TRUE ~ NA_real_
+    ),
+    `Lugar de origen` = case_when(
+      `Lugar de origen` == "España" ~ 1,
+      TRUE ~ 2
+    )
+  )
+
+# Transformed the variables into factors
+metabolomic_data$`Fumadora SI/NO` <- factor(metabolomic_data$`Fumadora SI/NO`, levels = c(1, 2), labels = c("Sí", "No"))
+
+metabolomic_data$`Presencia de diabetes SI/NO` <- factor(metabolomic_data$`Presencia de diabetes SI/NO`, levels = c(1, 2), labels = c("Sí", "No"))
+
+metabolomic_data$`Antecedentes de enfermedad cardiovascular SI/NO` <- factor(metabolomic_data$`Antecedentes de enfermedad cardiovascular SI/NO`, levels = c(1, 2), labels = c("Sí", "No"))
+
+metabolomic_data$`Lugar de origen` <- factor(metabolomic_data$`Lugar de origen`, levels = c(1, 2), labels = c("España", "Otro"))
+
+head(metabolomic_data["Fumadora SI/NO"])
+
+metabolomic_data$`Grupo_factores` <- factor(metabolomic_data$`Grupo_factores`, levels = c(1, 2, 3), labels = c("1", "2", "3"))
+
+# Check the distribution of the factors
+table(metabolomic_data["Fumadora SI/NO"])
+table(metabolomic_data["Presencia de diabetes SI/NO"])
+table(metabolomic_data["Antecedentes de enfermedad cardiovascular SI/NO"])
+table(metabolomic_data["Lugar de origen"])
+table(metabolomic_data["Grupo_factores"])
+
+# Rename variables
+metabolomic_data <- metabolomic_data %>%
+  dplyr::rename(Grupo = "Grupo_factores",
+         VLDL_C = "VLDL-C",
+         IDL_C = "IDL-C",
+         LDL_C = "LDL-C",
+         HDL_C = "HDL-C",
+         VLDL_TG = "VLDL-TG",
+         IDL_TG = "IDL-TG",
+         LDL_TG = "LDL-TG",
+         HDL_TG = "HDL-TG",
+         Total_VLDL_P = "VLDL-P (nmol/L)",
+         L_VLDL_P = "Large VLDL-P (nmol/L)",
+         M_VLDL_P = "Medium VLDL-P (nmol/L)",
+         S_VLDL_P = "Small VLDL-P (nmol/L)",
+         Total_LDL_P = "LDL-P (nmol/L)",
+         L_LDL_P = "Large LDL-P (nmol/L)",
+         M_LDL_P = "Medium LDL-P (nmol/L)",
+         S_LDL_P = "Small LDL-P (nmol/L)",
+         Total_HDL_P = "HDL-P (μmol/L)",
+         L_HDL_P = "Large HDL-P (μmol/L)",
+         M_HDL_P = "Medium HDL-P (μmol/L)",
+         S_HDL_P = "Small HDL-P (μmol/L)",
+         VLDL_Z = "VLDL-Z (nm)",
+         LDL_Z = "LDL-Z (nm)",
+         HDL_Z = "HDL-Z (nm)",
+         Glyc_A = "Glyc-A (μmol/L)",
+         Glyc_B = "Glyc-B (μmol/L)",
+         Glyc_F = "Glyc-F (μmol/L)",
+         HW_Glyc_B = "H/W Glyc-B",
+         HW_Glyc_A = "H/W Glyc-A",
+         "3_Hydroxybutyrate" = "3-Hydroxybutyrate",
+         Glucose = "Glucose(mmol/L)",
+         w6_w7 = "w6+w7",
+         ARA_EPA = "ARA+EPA",
+         Diabetes = "Presencia de diabetes SI/NO",
+         Antecedentes = "Antecedentes de enfermedad cardiovascular SI/NO",
+         Tension_sistolica = "Tensión sistólica (mmHg)",
+         Origen = "Lugar de origen",
+         Fumadora = "Fumadora SI/NO",
+         Total_PUFA = "PUFA",
+         Total_SFA = "SFA"
+         )
+
+colnames(metabolomic_data)
+str(metabolomic_data)
+summary(metabolomic_data)
+```
+
+## Create 5 new variables: Total choleterol (Total C), ratio Cholesterol/HDL (atherogenic index), Total Triglycerides, TG/PG y HDL/LDL.
+
+```{r}
+# Calculate total cholesterol
+metabolomic_data$"Total_C" <- metabolomic_data$"VLDL_C" + metabolomic_data$"IDL_C" + metabolomic_data$"LDL_C" + metabolomic_data$"HDL_C"
+
+# Calculate the Total C / HDL-C ratio
+metabolomic_data$"Total_C_HDL_C" <- metabolomic_data$"Total_C" / metabolomic_data$"HDL_C"
+
+# Calculate total triglycerides
+metabolomic_data$"Total_Triglycerides" <- metabolomic_data$"VLDL_TG" + metabolomic_data$"IDL_TG" + metabolomic_data$"LDL_TG" + metabolomic_data$"HDL_TG"
+
+# Calculate the TG / PG ratio
+metabolomic_data$"TG_PG" <- metabolomic_data$"Total_Triglycerides" / (metabolomic_data$"PL" + metabolomic_data$"LPC")
+
+# Calculate the HDL / LDL ratio
+metabolomic_data$"HDL_LDL" <- metabolomic_data$"HDL_C" / metabolomic_data$"LDL_C"
+
+metabolomic_data[,72:77]
+```
+
+
+## Analyse missing values:
+
+```{r}
+metabolomic_data[metabolomic_data == "NA"] <- NA
+metabolomic_data[metabolomic_data == "<LOD"] <- NA
+anyNA(metabolomic_data)
+
+missing_values <- sapply(metabolomic_data, function(x) sum(is.na(x)))
+print(missing_values)
+nrow(metabolomic_data)
+```
+
+## Removal of variables with too many missing values:
+
+```{r}
+columns_to_remove <- c("3_Hydroxybutyrate")
+
+metabolomic_data <- metabolomic_data %>% 
+  select(-all_of(columns_to_remove))
+
+head(metabolomic_data)
+str(metabolomic_data)
+```
+
+
+## Prepare the matrix for the imputation
+
+```{r}
+columns_to_impute <- metabolomic_data %>%
+  select(Acetate, Glycerol, Threonine)
+matrix_metabolomic_data=as.matrix(columns_to_impute) # For knn.impute only, otherwise leave it as a data.frame
+```
+
+
+# Step 2: Impute missing values
+
+### (Optional jump in at the end of step 2 if you have no missing data)
+
+```{r}
+imputed=knn.impute(matrix_metabolomic_data)
+
+write.table(imputed,imputed_filename,row.names=T,col.names=T,quote=F,sep="\t")
+
+write.table(imputed,"imputed_metabolomic_data.csv",row.names=T,col.names=T,quote=F,sep=",")
+```
+
+####
+####  Already have data complete without missing data? Read in here! (remove the hash)
+####
+
+```{r}
+i_filename="041224_PrePost_Menop_metabolomics_Imputed_risk_factors.txt"
+imputed_metabolomic_data=read.table(i_filename,as.is=T,row.names=1,h=T,check.names=F,sep="\t")
+anyNA(imputed_metabolomic_data)
+```
+
+## Compare the statistics before and after the imputation:
+
+```{r}
+compare_statistics <- function(data1, var1, data2, var2) {
+  if (!(var1 %in% colnames(data1))) {
+    stop(paste("La variable", var1, "no está en metabolomic_data"))
+  }
+  if (!(var2 %in% colnames(data2))) {
+    stop(paste("La variable", var2, "no está en metabolomic_data"))
+  }
+
+  data1[[var1]] <- as.numeric(data1[[var1]]) 
+  data2[[var2]] <- as.numeric(data2[[var2]])
+  
+  stats_var1 <- summary(data1[[var1]], na.rm = TRUE)
+  stats_var1 <- data.frame(Statistic = names(stats_var1), Value = as.numeric(stats_var1))
+  
+  stats_var2 <- summary(data2[[var2]], na.rm = TRUE)
+  stats_var2 <- data.frame(Statistic = names(stats_var2), Value = as.numeric(stats_var2))
+  
+  comparison <- merge(stats_var1, stats_var2, by = "Statistic", suffixes = c("_original", "_imputed"))
+  
+  return(comparison)
+}
+
+# Statistics after imputation
+statistics_acetate <- compare_statistics(metabolomic_data, "Acetate", imputed_metabolomic_data, "Acetate")
+print(statistics_acetate)
+
+statistics_glycerol <- compare_statistics(metabolomic_data, "Glycerol", imputed_metabolomic_data, "Glycerol")
+print(statistics_glycerol)
+
+statistics_threonine <- compare_statistics(metabolomic_data, "Threonine", imputed_metabolomic_data, "Threonine")
+print(statistics_threonine)
+```
+
+
+```{r}
+imputed_columns_df <- as.data.frame(imputed_metabolomic_data)
+
+metabolomic_data_imputed <- metabolomic_data %>%
+  select(-Acetate, -Glycerol, -Threonine) %>%
+  bind_cols(imputed_columns_df)
+
+head(metabolomic_data_imputed)
+anyNA(metabolomic_data_imputed)
+```
+
+
+
+
+# Step 3: Calculate correlation matrix
+
+```{r}
+toCor=metabolomic_data_imputed[, -c(1, 2, which(colnames(metabolomic_data_imputed) %in% c("Grupo", "Antecedentes", "Diabetes", "Fumadora", "Origen", "Nodo", "Tension_sistolica", "Total_C", "Total_Triglycerides")))]
+# Get rid of columns with clinical features, phenotype, or sampleID prior to doing the correlation matrix
+str(toCor)
+cov=metabolomic_data_imputed[, c(1, 2, which(colnames(metabolomic_data_imputed) %in% c("Grupo", "Antecedentes", "Diabetes", "Fumadora", "Origen", "Nodo", "Tension_sistolica","Total_C", "Total_Triglycerides")))]
+
+correlationMatrix <- cor(toCor)
+diag(correlationMatrix)<-0
+
+write.table(correlationMatrix,CM_filename,row.names=T,col.names=T,quote=F,sep="\t")
+```
+
+
+# Step 4: Homology reduction
+
+```{r}
+metabolomic_data_imputed_cleaned <- metabolomic_data_imputed %>%
+  select(-Nodo, -"Sample ID BT", -"Sample ID Client", -"Total_C", -"Total_Triglycerides", -"Fumadora", -"Tension_sistolica", -c(, "Antecedentes", "Diabetes", "Origen"))
+
+correlationMatrix <- abs(correlationMatrix)
+
+hc <- caret::findCorrelation(correlationMatrix, cutoff=cutoff)
+##:: can be used to call a function from a package. In this case I am telling R to use findCorrelation from the caret package
+
+columns_to_remove <- colnames(toCor)[hc]
+print(columns_to_remove)
+
+str(metabolomic_data_imputed_cleaned)
+
+metabolomic_data_cleaned <- metabolomic_data_imputed_cleaned %>%
+  select(-all_of(columns_to_remove))
+
+str(metabolomic_data_cleaned)
+```
+
+
+# Step 6: Write table
+
+```{r}
+write.table(metabolomic_data_cleaned,cleaned_filename,row.names=T,col.names=T,quote=F,sep="\t")
+
+columnas_iniciales <- colnames(metabolomic_data_imputed_cleaned)
+columnas_finales <- colnames(metabolomic_data_cleaned)
+ncol(metabolomic_data_imputed_cleaned)
+ncol(metabolomic_data_cleaned)
+
+columnas_eliminadas <- setdiff(columnas_iniciales, columnas_finales)
+
+print("Columnas eliminadas:")
+print(columnas_eliminadas)
+
+str(metabolomic_data_cleaned)
+```
+
+
+
+
+# Step 7: Analysis of outliers
+
+## Outliers per variable: 
+
+```{r}
+if (!dir.exists("Outliers")) {
+  dir.create("Outliers")
+}
+
+counter <- 1
+
+for (column in names(cleaned_ids)) {
+  if (column != "Grupo" && column != "Sample ID Client")
+    
+    cleaned_data <- cleaned_ids[!is.na(cleaned_ids[[column]]), ]
+    cleaned_data$Grupo <- as.factor(cleaned_data$Grupo)
+    
+    Q1 <- tapply(cleaned_data[[column]], cleaned_data$Grupo, function(x) quantile(x, 0.25))
+    Q3 <- tapply(cleaned_data[[column]], cleaned_data$Grupo, function(x) quantile(x, 0.75))
+    IQR <- Q3 - Q1
+    lower_bound <- Q1 - 1.5 * IQR
+    upper_bound <- Q3 + 1.5 * IQR
+    
+    outliers_data <- cleaned_data[
+      cleaned_data[[column]] < unlist(lower_bound)[as.factor(cleaned_data$Grupo)] | 
+      cleaned_data[[column]] > unlist(upper_bound)[as.factor(cleaned_data$Grupo)], 
+    ]
+    
+    outliers_data$Sample_ID <- cleaned_data$`Sample ID Client`[match(outliers_data$`Sample ID Client`, cleaned_data$`Sample ID Client`)]
+    
+    p <- ggplot(cleaned_data, aes(x = Grupo, y = .data[[column]], fill = Grupo)) +
+      geom_boxplot(outlier.shape = NA, alpha = 0.5) +  
+      scale_fill_manual(values = c("skyblue", "lightgreen", "lightpink")) + 
+      geom_point(data = outliers_data, aes(x = Grupo, y = .data[[column]]), color = "red", size = 3) +
+      geom_text(data = outliers_data, aes(x = Grupo, y = .data[[column]], label = Sample_ID), 
+                color = "red", hjust = 0.5, vjust = -0.5, size = 2) +  
+      labs(title = paste("Boxplot for", column), 
+           x = "Grupo", 
+           y = column) +
+      theme_minimal() +
+      theme(legend.position = "none",  # Eliminar la leyenda
+            axis.title.x = element_text(size = 14),
+            axis.title.y = element_text(size = 14),
+            plot.title = element_text(size = 16, face = "bold"))
+    
+    ggsave(filename = paste0("Outliers/boxplot_", counter, ".png"), plot = p, width = 8, height = 6, dpi = 300, bg = "white")
+    
+    counter <- counter + 1
+  }
+}
+```
+
+
+## Outliers per sample:
+
+```{r}
+outlier_per_sample_list <- list()
+
+for (column in names(cleaned_ids)) {
+  if (column != "Grupo" && column != "Sample ID Client") {
+    cleaned_data <- cleaned_ids[!is.na(cleaned_ids[[column]]), ]  
+    cleaned_data$Grupo <- as.factor(cleaned_data$Grupo)
+    Q1 <- tapply(cleaned_data[[column]], cleaned_data$Grupo, function(x) quantile(x, 0.25))
+    Q3 <- tapply(cleaned_data[[column]], cleaned_data$Grupo, function(x) quantile(x, 0.75))
+    IQR <- Q3 - Q1
+    lower_bound <- Q1 - 1.5 * IQR
+    upper_bound <- Q3 + 1.5 * IQR
+    
+    # Identifiy outliers
+    outliers_data <- cleaned_data[
+      cleaned_data[[column]] < unlist(lower_bound)[as.factor(cleaned_data$Grupo)] | 
+      cleaned_data[[column]] > unlist(upper_bound)[as.factor(cleaned_data$Grupo)], 
+    ]
+    
+    if (nrow(outliers_data) > 0) {
+      outliers_data$Sample_ID <- cleaned_data$`Sample ID Client`[match(outliers_data$`Sample ID Client`, cleaned_data$`Sample ID Client`)]
+      for (i in 1:nrow(outliers_data)) {
+        sample_id <- outliers_data$Sample_ID[i]
+        if (!(sample_id %in% names(outlier_per_sample_list))) {
+          outlier_per_sample_list[[sample_id]] <- data.frame("Sample ID Client" = sample_id, stringsAsFactors = FALSE)
+        }
+        outlier_per_sample_list[[sample_id]][, column] <- outliers_data[[column]][i]
+      }
+    }
+  }
+}
+
+for (sample_id in names(outlier_per_sample_list)) {
+  print(outlier_per_sample_list[[sample_id]])
+}
+
+```
+
+
+## Tables with the range and mean of each variable:
+
+```{r}
+summary_tables <- list()
+
+for (column in names(cleaned_ids)) {
+  if (column != "Grupo" && column != "Sample ID Client") {  
+    media <- mean(cleaned_ids[[column]], na.rm = TRUE)
+    min_value <- min(cleaned_ids[[column]], na.rm = TRUE)
+    max_value <- max(cleaned_ids[[column]], na.rm = TRUE)
+    
+    variable_summary <- data.frame("Variable" = column, 
+                                   "Media" = media, 
+                                   "Min" = min_value, 
+                                   "Max" = max_value)
+    summary_tables[[column]] <- variable_summary
+  }
+}
+
+for (table_name in names(summary_tables)) {
+  cat("\nSummary table for the variable", table_name, ":\n")
+  print(summary_tables[[table_name]])
+}
+
+
+```
+
+
+
+# Step 8: Analyse batch effect
+
+```{r}
+nodes_data <- read_excel("C:/Users/alici/Desktop/TFM/R/Metabolomica/datos_clinicos.xlsx")
+
+nodes_df <- cleaned_ids %>%
+  left_join(nodes_data %>% select(`Sample ID Client`, Nodo), by = "Sample ID Client")
+
+nodes_df$Nodo <- as.factor(nodes_df$Nodo)
+
+pca_result <- prcomp(nodes_df %>% select(where(is.numeric)), center = TRUE, scale. = TRUE)
+
+summary(pca_result)
+
+fviz_eig(pca_result)
+
+p <- fviz_pca_ind(pca_result,
+                  geom.ind = "point",
+                  col.ind = nodes_df$Nodo,
+                  palette = c("#00AFBB", "#E7B800", "#FC4E07", "#7CFC00", "#FF1493"),
+                  addEllipses = TRUE,
+                  ellipse.type = "convex",
+                  legend.title = "Node",
+                  pointsize = 2) + 
+     labs(title = "PCA by Node") 
+
+p <- p + scale_shape_manual(values = rep(16, length(unique(nodes_df$Nodo))))
+
+ggsave("pca.svg", plot= p,width = 6, height = 4, dpi = 300)
+```
